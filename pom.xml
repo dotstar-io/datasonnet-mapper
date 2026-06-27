@@ -21,7 +21,7 @@
 
     <groupId>com.datasonnet</groupId>
     <artifactId>datasonnet-mapper</artifactId>
-    <version>3.0.2-SNAPSHOT</version>
+    <version>3.0.2-ds1</version>
     <name>DataSonnet Mapper</name>
     <description>A transformation domain specific language</description>
     <url>https://github.com/datasonnet/datasonnet-mapper</url>
@@ -65,16 +65,13 @@
         <url>https://github.com/datasonnet/datasonnet-mapper</url>
         <tag>3.0.1</tag>
     </scm>
+    <!-- dotstar fork: publish patched builds to the private GitHub Packages registry.
+         NOT for upstream — upstream publishes to Maven Central. -->
     <distributionManagement>
-<!--
         <repository>
-            <id>sonatype-ossrh</id>
-            <url>https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/</url>
-        </repository>
--->
-        <repository>
-            <id>central</id>
-            <url>https://central.sonatype.com</url>
+            <id>github</id>
+            <name>dotstar-io GitHub Packages</name>
+            <url>https://maven.pkg.github.com/dotstar-io/datasonnet-mapper</url>
         </repository>
     </distributionManagement>
 
@@ -635,16 +632,9 @@
                     <autoReleaseAfterClose>true</autoReleaseAfterClose>
                 </configuration>
             </plugin>-->
-            <plugin>
-                <groupId>org.sonatype.central</groupId>
-                <artifactId>central-publishing-maven-plugin</artifactId>
-                <version>0.8.0</version>
-                <extensions>true</extensions>
-                <configuration>
-                    <publishingServerId>central</publishingServerId>
-                    <autoPublish>true</autoPublish>
-                </configuration>
-            </plugin>
+            <!-- dotstar fork: upstream's central-publishing-maven-plugin (Maven Central) is
+                 removed here; the standard maven-deploy-plugin publishes to the GitHub
+                 Packages URL in distributionManagement. Restore for the upstream PR. -->
         </plugins>
     </build>
 
