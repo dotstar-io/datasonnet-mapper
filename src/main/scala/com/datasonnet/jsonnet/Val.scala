@@ -1,7 +1,7 @@
 package com.datasonnet.jsonnet
 
 /*-
- * Copyright 2019-2023 the original author or authors.
+ * Copyright 2019-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,15 +61,20 @@ object Val{
   class Lazy(calc0: => Val){
     // WIP debugger support. This flags can be used to show on the client whether the value is now present or has not been evaluated lazily
     var isSet = false;
-    def force =
-      if (sys.props.getOrElse("debug", "false") == "true") {
-        isSet = true;
-        val forceE = calc0
-        forceE
-      } else {
-        lazy val forceL = calc0
-        forceL
+    // Memoize the computed value per Lazy instance. Previously `force` declared
+    // a method-local `lazy val`, which re-evaluated `calc0` on EVERY call —
+    // turning every repeated reference to a `local` binding into a full
+    // re-computation. For an object built by an O(n) foldl that is referenced
+    // O(n) times (e.g. ds.arrays.groupBy then n std.get lookups) this made the
+    // whole transform O(n^2). Caching here makes each binding compute once.
+    private[this] var forced: Val = _
+    def force: Val = {
+      if (!isSet) {
+        forced = calc0
+        isSet = true
       }
+      forced
+    }
   }
   object Lazy{
     def apply(calc0: => Val) = new Lazy(calc0)
@@ -95,6 +100,23 @@ object Val{
   }
   case class Arr(value: Seq[Lazy]) extends Val{
     def prettyName = "array"
+
+    // The public construction API keeps `value: Seq[Lazy]` (called from Scala and
+    // from Java via `new Val.Arr(seq)`), but List-backed sequences make indexing
+    // (`apply(i)`) and `length` O(n)/O(i). We expose an indexed (Vector-backed)
+    // view so that array element access and length are effectively O(1). The view
+    // is lazy and preserves the original element ordering and laziness — only the
+    // backing collection type differs.
+    lazy val indexed: IndexedSeq[Lazy] = value match {
+      case v: IndexedSeq[Lazy] => v
+      case o => o.toVector
+    }
+
+    // O(1) indexed access (vs. O(i) on a List-backed Seq).
+    @inline def get(i: Int): Lazy = indexed(i)
+
+    // O(1) length (vs. O(n) on a List-backed Seq).
+    @inline def length: Int = indexed.length
   }
   object Obj{
 
@@ -103,6 +125,14 @@ object Val{
                       invoke: (Obj, Option[Obj], FileScope, EvalScope) => Val,
                       cached: Boolean = true)
 
+    // A single (defining object, member) contributor to a flattened key.
+    final case class Contributor(definingObj: Obj, member: Member)
+
+    // Super-chain depth above which field lookups switch from the recursive
+    // (O(depth) per lookup) walk to the flattened index (O(contributors) per
+    // lookup after a one-time O(total members) build). Below the threshold the
+    // recursive path is cheaper and allocation-free.
+    final val FlatIndexThreshold = 8
 
   }
   final class Obj(value0: mutable.Map[String, Obj.Member],
@@ -110,6 +140,10 @@ object Val{
                   `super`: Option[Obj]) extends Val{
 
     def getSuper = `super`
+
+    // Instance-private constructor param `value0` is not accessible on other
+    // Obj instances; expose it within the class for the flattened index walk.
+    private def members: mutable.Map[String, Obj.Member] = value0
 
     @tailrec def triggerAllAsserts(obj: Val.Obj): Unit = {
       triggerAsserts(obj)
@@ -129,23 +163,48 @@ object Val{
     def prettyName = "object"
 
     def foreachVisibleKey(output: (String, Visibility) => Unit): Unit = {
-      for(s <- this.`super`) s.foreachVisibleKey(output)
-      for(t <- value0) output(t._1, t._2.visibility)
+      // Iterative base->top walk (avoids deep recursion on long super chains).
+      val chain = collection.mutable.ArrayBuffer.empty[Obj]
+      var cur: Option[Obj] = Some(this)
+      while (cur.isDefined) {
+        val o = cur.get
+        chain += o
+        cur = o.getSuper
+      }
+      var i = chain.length - 1
+      while (i >= 0) {
+        val it = chain(i).members.iterator
+        while (it.hasNext) {
+          val t = it.next()
+          output(t._1, t._2.visibility)
+        }
+        i -= 1
+      }
     }
 
-    def getVisibleKeys() = {
-      val mapping = mutable.LinkedHashMap.empty[String, Boolean]
-      foreachVisibleKey{ (k, sep) =>
-        (mapping.get(k), sep) match{
-          case (None, Visibility.Hidden) => mapping(k) = true
-          case (None, _)    => mapping(k) = false
+    // Cached visible-keys map. Like the flattened member index, this avoids
+    // re-walking the whole super chain on every `getVisibleKeys()` call. The
+    // result is deterministic for an (immutable) Obj, so it is safe to memoize.
+    // std.get / std.objectHas call this O(n) times; without caching each call
+    // is O(depth) -> O(n^2) on a deep groupBy super chain.
+    private[this] var visibleKeysCache: mutable.LinkedHashMap[String, Boolean] = null
 
-          case (Some(false), Visibility.Hidden) => mapping(k) = true
-          case (Some(true), Visibility.Unhide) => mapping(k) = false
-          case (Some(x), _) => mapping(k) = x
+    def getVisibleKeys(): mutable.LinkedHashMap[String, Boolean] = {
+      if (visibleKeysCache == null) {
+        val mapping = mutable.LinkedHashMap.empty[String, Boolean]
+        foreachVisibleKey{ (k, sep) =>
+          (mapping.get(k), sep) match{
+            case (None, Visibility.Hidden) => mapping(k) = true
+            case (None, _)    => mapping(k) = false
+
+            case (Some(false), Visibility.Hidden) => mapping(k) = true
+            case (Some(true), Visibility.Unhide) => mapping(k) = false
+            case (Some(x), _) => mapping(k) = x
+          }
         }
+        visibleKeysCache = mapping
       }
-      mapping
+      visibleKeysCache
     }
     // made accessible to the Debugger
     //    private[this]
@@ -185,7 +244,7 @@ object Val{
                    (implicit fileScope: FileScope, evaluator: EvalScope) = (l, r) match{
       case (Val.Str(l), Val.Str(r)) => Val.Str(l + r)
       case (Val.Num(l), Val.Num(r)) => Val.Num(l + r)
-      case (Val.Arr(l), Val.Arr(r)) => Val.Arr(l ++ r)
+      case (l: Val.Arr, r: Val.Arr) => Val.Arr(l.indexed ++ r.indexed)
       case (l: Val.Obj, r: Val.Obj) => r.addSuper(l)
       case (Val.Str(l), r) =>
         try Val.Str(l + evaluator.materialize(r).transform(new Renderer()).toString)
@@ -208,11 +267,47 @@ object Val{
                  self: Obj,
                  offset: Int)
                 (implicit fileScope: FileScope, evaluator: EvalScope): Option[(Val, Boolean)] = {
+      // For shallow super-chains the naive recursive resolution is optimal and
+      // allocation-free, so use it directly. For DEEP chains (e.g. an n-level
+      // groupBy built via foldl `acc { [key]+: [item] }`) the recursion is
+      // O(depth) per lookup -> O(n^2) across n lookups; there we consult a
+      // lazily-built, per-key flattened index so each lookup is O(contributors).
+      if (superChainDepth <= Obj.FlatIndexThreshold) valueRawRec(k, self, offset)
+      else {
+        val contributors = flatIndex.get(k)
+        if (contributors == null) None
+        else {
+          // Fold mergeMember over the ordered contributors (base -> top),
+          // invoking each member with the correct `self` and the defining
+          // object's own `super`, exactly as valueRawRec would.
+          var acc: Val = null
+          var cached = true
+          var i = 0
+          while (i < contributors.length) {
+            val c = contributors(i)
+            val invoked = c.definingObj.invokeMember(c.member, self, fileScope, evaluator)
+            acc =
+              if (acc == null) invoked
+              else if (c.member.add) mergeMember(acc, invoked, offset)
+              else invoked
+            cached = c.member.cached
+            i += 1
+          }
+          Some(acc -> cached)
+        }
+      }
+    }
+
+    // Original recursive field resolution (walks the super chain lazily).
+    private def valueRawRec(k: String,
+                            self: Obj,
+                            offset: Int)
+                           (implicit fileScope: FileScope, evaluator: EvalScope): Option[(Val, Boolean)] = {
       this.value0.get(k) match{
         case Some(m) =>
           this.`super` match{
             case Some(s) if m.add =>
-              val merged = s.valueRaw(k, self, offset) match{
+              val merged = s.valueRawRec(k, self, offset) match{
                 case None => m.invoke(self, this.`super`, fileScope, evaluator)
                 case Some((supValue, supCached)) =>
                   mergeMember(supValue, m.invoke(self, this.`super`, fileScope, evaluator), offset)
@@ -226,9 +321,76 @@ object Val{
 
         case None => this.`super` match{
           case None => None
-          case Some(s) => s.valueRaw(k, self, offset)
+          case Some(s) => s.valueRawRec(k, self, offset)
         }
       }
+    }
+
+    // Invoke a member that is defined on THIS object, passing this object's
+    // own `super` (so additive members and `super` references resolve exactly
+    // as in the recursive walk).
+    private def invokeMember(m: Obj.Member, self: Obj,
+                             fileScope: FileScope, evaluator: EvalScope): Val =
+      m.invoke(self, this.`super`, fileScope, evaluator)
+
+    // Cached length of the super chain (this object + all ancestors). Computed
+    // once; each addSuper produces a fresh Obj whose depth is recomputed.
+    private[this] var superChainDepthCache: Int = -1
+    private def superChainDepth: Int = {
+      if (superChainDepthCache < 0) {
+        var d = 0
+        var cur: Option[Obj] = Some(this)
+        while (cur.isDefined) { d += 1; cur = cur.get.getSuper }
+        superChainDepthCache = d
+      }
+      superChainDepthCache
+    }
+
+    // Lazily-computed, self-independent flattened member index for DEEP chains.
+    // Maps each key to the ordered list of contributing (definingObj, member)
+    // pairs (base -> top), so additive `+:` merges replay in the correct order.
+    private[this] var flatIndexCache: java.util.HashMap[String, Array[Obj.Contributor]] = null
+    private def flatIndex: java.util.HashMap[String, Array[Obj.Contributor]] = {
+      if (flatIndexCache == null) {
+        // Collect chain objects top -> base.
+        val chain = collection.mutable.ArrayBuffer.empty[Obj]
+        var cur: Option[Obj] = Some(this)
+        while (cur.isDefined) { val o = cur.get; chain += o; cur = o.getSuper }
+        val builders = new java.util.LinkedHashMap[String, collection.mutable.ArrayBuffer[Obj.Contributor]]()
+        // Walk base -> top so contributor lists are in merge order.
+        var i = chain.length - 1
+        while (i >= 0) {
+          val o = chain(i)
+          val it = o.members.iterator
+          while (it.hasNext) {
+            val kv = it.next()
+            val k = kv._1
+            val m = kv._2
+            if (m.add) {
+              var buf = builders.get(k)
+              if (buf == null) {
+                buf = collection.mutable.ArrayBuffer.empty[Obj.Contributor]
+                builders.put(k, buf)
+              }
+              buf += Obj.Contributor(o, m)
+            } else {
+              // Non-additive member resets the merge chain for this key.
+              val buf = collection.mutable.ArrayBuffer.empty[Obj.Contributor]
+              buf += Obj.Contributor(o, m)
+              builders.put(k, buf)
+            }
+          }
+          i -= 1
+        }
+        val result = new java.util.HashMap[String, Array[Obj.Contributor]](builders.size() * 2)
+        val eit = builders.entrySet().iterator()
+        while (eit.hasNext) {
+          val e = eit.next()
+          result.put(e.getKey, e.getValue.toArray)
+        }
+        flatIndexCache = result
+      }
+      flatIndexCache
     }
 
     @tailrec def containsKey(k: String): Boolean = {

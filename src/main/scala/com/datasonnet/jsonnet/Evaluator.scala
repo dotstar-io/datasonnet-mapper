@@ -1,7 +1,7 @@
 package com.datasonnet.jsonnet
 
 /*-
- * Copyright 2019-2024 the original author or authors.
+ * Copyright 2019-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -76,7 +76,7 @@ class Evaluator(parseCacheP: collection.mutable.Map[String, fastparse.Parsed[(Ex
       case Num(offset, value) => Val.Num(value)
       case Id(offset, value) => visitId(offset, value)
 
-      case Arr(offset, value) => Val.Arr(value.map(v => Val.Lazy(visitExpr(v))))
+      case Arr(offset, value) => Val.Arr(value.iterator.map(v => Val.Lazy(visitExpr(v))).toVector)
       case Obj(offset, value) => visitObjBody(value)
 
       case UnaryOp(offset, op, value) => visitUnaryOp(op, value)
@@ -106,7 +106,7 @@ class Evaluator(parseCacheP: collection.mutable.Map[String, fastparse.Parsed[(Ex
       case TryElse(offset, try0, else0) => visitTryElse(offset, try0, else0)
 
       case Comp(offset, value, first, rest) =>
-        Val.Arr(visitComp(first :: rest.toList, Seq(scope)).map(s => Val.Lazy(visitExpr(value)(s, implicitly))))
+        Val.Arr(visitComp(first :: rest.toList, Seq(scope)).iterator.map(s => Val.Lazy(visitExpr(value)(s, implicitly))).toVector)
       case ObjExtend(offset, value, ext) => {
         val original = visitExpr(value).cast[Val.Obj]
         val extension = visitObjBody(ext)
@@ -216,8 +216,8 @@ class Evaluator(parseCacheP: collection.mutable.Map[String, fastparse.Parsed[(Ex
                          stride: Option[Expr])
                         (implicit scope: ValScope, fileScope: FileScope)= {
     visitExpr(value) match {
-      case Val.Arr(a) =>
-
+      case arr: Val.Arr =>
+        val a = arr.indexed
         val range =
           start.fold(0)(visitExpr(_).cast[Val.Num].value.toInt) until
             end.fold(a.length)(visitExpr(_).cast[Val.Num].value.toInt) by
@@ -240,10 +240,11 @@ class Evaluator(parseCacheP: collection.mutable.Map[String, fastparse.Parsed[(Ex
       scope.super0.getOrElse(scope.self0.getOrElse(Error.fail("Cannot use `super` outside an object", offset))).value(key.value, offset)
     } else (visitExpr(value), visitExpr(index)) match {
       case (v: Val.Arr, i: Val.Num) =>
-        if (i.value > v.value.length) Error.fail(s"array bounds error: ${i.value} not within [0, ${v.value.length})", offset)
+        val len = v.length
+        if (i.value > len) Error.fail(s"array bounds error: ${i.value} not within [0, ${len})", offset)
         val int = i.value.toInt
         if (int != i.value) Error.fail("array index was not integer: " + i.value, offset)
-        try v.value(int).force
+        try v.get(int).force
         catch Error.tryCatchWrap(offset)
       case (v: Val.Str, i: Val.Num) => Val.Str(new String(Array(v.value(i.value.toInt))))
       case (v: Val.Obj, i: Val.Str) =>
@@ -392,7 +393,7 @@ class Evaluator(parseCacheP: collection.mutable.Map[String, fastparse.Parsed[(Ex
           case (Val.Num(l), Expr.BinaryOp.`^`, Val.Num(r)) => Val.Num(l.toLong ^ r.toLong)
           case (Val.Num(l), Expr.BinaryOp.`|`, Val.Num(r)) => Val.Num(l.toLong | r.toLong)
           case (l: Val.Obj, Expr.BinaryOp.`+`, r: Val.Obj) => r.addSuper(l)
-          case (Val.Arr(l), Expr.BinaryOp.`+`, Val.Arr(r)) => Val.Arr(l ++ r)
+          case (l: Val.Arr, Expr.BinaryOp.`+`, r: Val.Arr) => Val.Arr(l.indexed ++ r.indexed)
           case (l, op, r) =>
             Error.fail(s"Unknown binary operation: ${l.prettyName} $op ${r.prettyName}", offset)
         }

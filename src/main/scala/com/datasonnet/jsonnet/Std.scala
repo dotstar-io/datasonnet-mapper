@@ -1,7 +1,7 @@
 package com.datasonnet.jsonnet
 
 /*-
- * Copyright 2019-2023 the original author or authors.
+ * Copyright 2019-2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ object Std {
     builtin("length", "x"){ (ev, fs, v1: Val) =>
       v1 match{
         case Val.Str(s) => s.length
-        case Val.Arr(s) => s.length
+        case s: Val.Arr => s.length
         case o: Val.Obj => o.getVisibleKeys().count(!_._2)
         case o: Val.Func => o.params.args.length
         case _ => throw new Error.Delegate("Cannot get length of " + v1.prettyName)
