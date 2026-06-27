@@ -48,6 +48,8 @@ public class DefaultCSVFormatPlugin extends BaseJacksonDataFormatPlugin {
     public static final String DS_PARAM_NEW_LINE = "newline";
     public static final String DS_PARAM_HEADERS = "headers";
     public static final String DS_PARAM_DISABLE_QUOTES = "disablequotes";
+    public static final String DS_PARAM_COLUMNS = "columns";
+    public static final String DS_PARAM_FILE_NAME = "filename";
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final CsvMapper CSV_MAPPER = new CsvMapper();
@@ -67,6 +69,11 @@ public class DefaultCSVFormatPlugin extends BaseJacksonDataFormatPlugin {
         readerParams.add(DS_PARAM_NEW_LINE);
         readerParams.add(DS_PARAM_HEADERS);
         readerParams.add(DS_PARAM_DISABLE_QUOTES);
+        readerParams.add(DS_PARAM_COLUMNS);
+        // fileName is a resolver hint (e.g. glob to pick a source file). It does not
+        // affect parsing of a directly-provided input, but must be a recognized
+        // parameter so canRead() does not reject the media type.
+        readerParams.add(DS_PARAM_FILE_NAME);
 
         writerParams.addAll(readerParams);
 
@@ -93,28 +100,31 @@ public class DefaultCSVFormatPlugin extends BaseJacksonDataFormatPlugin {
         }
 
         CsvSchema.Builder builder = this.getBuilder(doc.getMediaType());
-        boolean useHeader = isUseHeader(doc.getMediaType());
+        boolean hasColumns = doc.getMediaType().getParameter(DS_PARAM_COLUMNS) != null;
+        // Parse rows into objects when a header row is consumed OR when explicit
+        // column names are supplied via the "columns" param (headerless objects).
+        boolean asObjects = isUseHeader(doc.getMediaType()) || hasColumns;
         CsvSchema csvSchema = builder.build();
 
         // Read data from CSV file
         try {
             if (String.class.isAssignableFrom(doc.getContent().getClass())) {
                 JsonNode result = CSV_MAPPER
-                        .readerFor(useHeader ? Map.class : List.class)
+                        .readerFor(asObjects ? Map.class : List.class)
                         .with(csvSchema)
                         .readTree((String) doc.getContent());
 
                 return ujsonFrom(result);
             } else if (byte[].class.isAssignableFrom(doc.getContent().getClass())) {
                 JsonNode result = CSV_MAPPER
-                        .readerFor(useHeader ? Map.class : List.class)
+                        .readerFor(asObjects ? Map.class : List.class)
                         .with(csvSchema)
                         .readTree((byte[]) doc.getContent());
 
                 return ujsonFrom(result);
             } else if (InputStream.class.isAssignableFrom(doc.getContent().getClass())) {
                 JsonNode result = CSV_MAPPER
-                        .readerFor(useHeader ? Map.class : List.class)
+                        .readerFor(asObjects ? Map.class : List.class)
                         .with(csvSchema)
                         .readTree((InputStream) doc.getContent());
 
@@ -184,6 +194,17 @@ public class DefaultCSVFormatPlugin extends BaseJacksonDataFormatPlugin {
         String useHeadrStr = mediaType.getParameter(DS_PARAM_USE_HEADER);
         boolean useHeader = Boolean.parseBoolean(Optional.ofNullable(useHeadrStr).orElse("true"));
         builder.setUseHeader(useHeader);
+
+        // Explicit, headerless column names: rows are mapped positionally to these
+        // names. The names come from the param, not a header row, so no header is
+        // consumed. Typically paired with UseHeader=false.
+        String columnsStr = mediaType.getParameter(DS_PARAM_COLUMNS);
+        if (columnsStr != null) {
+            builder.setUseHeader(false);
+            for (String name : columnsStr.split(",")) {
+                builder.addColumn(name.trim());
+            }
+        }
 
         String disableQuotesStr = mediaType.getParameter(DS_PARAM_DISABLE_QUOTES);
         boolean disableQuotes = Boolean.parseBoolean(Optional.ofNullable(disableQuotesStr).orElse("false"));
