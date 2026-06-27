@@ -266,6 +266,23 @@ public class MediaType implements Comparable<MediaType>, Serializable {
         }
     }
 
+    // DataSonnet allows comma-separated list values in unquoted parameters (e.g.
+    // "application/csv;columns=a,b,c"), matching the Node/.NET runtimes. RFC 2616 would
+    // require quoting, but DataSonnet headers use the bare form, so permit ',' in values.
+    // Type/subtype still use the strict checkToken; Accept-style comma-separated media-type
+    // lists are split (parseMediaTypes) before individual values are validated here.
+    private static void checkParameterValue(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (ch == ',') {
+                continue;
+            }
+            if (!TOKEN.get(ch)) {
+                throw new IllegalArgumentException("Invalid token character '" + ch + "' in token \"" + value + "\"");
+            }
+        }
+    }
+
     private static boolean isQuotedString(String s) {
         if (s == null) {
             return false;
@@ -595,7 +612,7 @@ public class MediaType implements Comparable<MediaType>, Serializable {
             value = unquote(value);
             Charset.forName(value);
         } else if (!isQuotedString(value)) {
-            checkToken(value);
+            checkParameterValue(value);
         }
 
         if (PARAM_QUALITY_FACTOR.equals(attribute)) {
